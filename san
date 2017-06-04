@@ -1,0 +1,183 @@
+from __future__ import print_function
+import keras
+import math
+import numpy
+import os
+#import h5py
+#import matplotlib.pylot as plt
+import pylab as pl
+from keras.preprocessing.image import ImageDataGenerator
+from keras.models import Sequential
+from keras.layers import Dense, Dropout, Activation, Flatten
+from keras.layers import Conv2D, MaxPooling2D
+from keras import backend as K
+from keras.callbacks import LearningRateScheduler,Callback#, ModelCheckpoint
+from keras import regularizers
+
+# with CAE
+#import cA.cA_orchard
+# without CAE
+from cA.logistic_sgd import load_san_data
+from scipy.misc import imsave
+
+import theano
+theano.compile.FAST_COMPILE
+# learning rate schedule
+
+def step_decay(epoch):
+	initial_lrate = 0.002
+	drop = 0.0001
+	#epochs_drop = 10.0
+	lrate = initial_lrate * math.pow(1 + drop * epoch, -0.75)
+	return lrate
+
+class LossHistory(Callback):  
+    def on_train_begin(self, logs={}):  
+        self.losses = []
+  
+    def on_batch_end(self, batch, logs={}):  
+        self.losses.append(logs.get('loss'))
+        
+batch_size = 100
+num_classes = 5
+epochs = 200 
+img_rows = 7
+img_cols = 10
+data_augmentation = False
+
+# The data, shuffled and split between train and test sets:
+#(x_train,y_train_t), (x_test_t,y_test_t) = cA.cA_orchard.test_cA(learning_rate=0.01, training_epochs=200,batch_size=10,  contraction_level=.1)
+(x_train_t,y_train_t), (x_test_t,y_test_t) = load_san_data('san_data')
+
+x_train = x_train_t.get_value()
+x_test = x_test_t.get_value()
+y_train = y_train_t.eval()
+y_test = y_test_t.eval()
+
+if K.image_data_format() == 'channels_first':
+    x_train = x_train.reshape(x_train.shape[0], 1, img_rows, img_cols)
+    x_test = x_test.reshape(x_test.shape[0], 1, img_rows, img_cols)
+    input_shape = (1, img_rows, img_cols)
+else:
+    x_train = x_train.reshape(x_train.shape[0], img_rows, img_cols, 1)
+    x_test = x_test.reshape(x_test.shape[0], img_rows, img_cols, 1)
+    input_shape = (img_rows, img_cols, 1)
+
+x_train = x_train.astype('float32')
+x_test = x_test.astype('float32')
+
+print('x_train shape:', x_train.shape)
+print(x_train.shape[0], 'train samples')
+print(x_test.shape[0], 'test samples')
+
+# Convert class vectors to binary class matrices.
+y_train = keras.utils.to_categorical(y_train, num_classes)
+y_test = keras.utils.to_categorical(y_test, num_classes)
+
+model = Sequential()
+
+model.add(Conv2D(8, (3, 3), padding='same', kernel_regularizer=regularizers.l2(0.0001),
+                 input_shape=x_train.shape[1:]))
+model.add(Activation('relu'))
+#model.add(Conv2D(8, (9, 9)))
+#model.add(Activation('relu'))
+model.add(Dropout(0.25))
+model.add(MaxPooling2D(pool_size=(2, 2),strides= 2))
+
+model.add(Conv2D(20, (2, 2), padding='same',kernel_regularizer=regularizers.l2(0.0005)))
+model.add(Activation('relu'))
+model.add(Dropout(0.5))
+model.add(MaxPooling2D(pool_size=(2, 2),strides= 2))
+#model.add(Conv2D(128, (3, 3)))
+#model.add(Activation('relu'))
+#model.add(MaxPooling2D(pool_size=(2, 2)))
+
+model.add(Flatten())
+#model.add(Dense(100,kernel_regularizer=regularizers.l2(0.0001)))
+#model.add(Activation('relu'))
+model.add(Dropout(0.5))
+model.add(Dense(num_classes))
+model.add(Activation('softmax'))
+
+# initiate RMSprop optimizer
+#lrate = 0.01
+#opt = keras.optimizers.SGD(lr=0.0, momentum = 0.9, decay=0.0, nesterov = True)
+#opt = keras.optimizers.rmsprop(lr=0.0001, decay=1e-6)
+opt = keras.optimizers.Adam(lr=0.0001, decay=1e-6)
+# Let's train the model using RMSprop
+model.compile(loss='categorical_crossentropy',optimizer=opt,metrics=['accuracy'])
+
+lrate = LearningRateScheduler(step_decay)
+history = LossHistory()
+if not data_augmentation:
+    print('Not using data augmentation.')
+    model.fit(x_train, y_train,
+              batch_size=batch_size,
+              epochs=epochs,
+              validation_split=0.2,
+              shuffle=True, callbacks=[lrate,history])
+else:
+    print('Using real-time data augmentation.')
+    # This will do preprocessing and realtime data augmentation:
+    datagen = ImageDataGenerator(
+        featurewise_center=False,  # set input mean to 0 over the dataset
+        samplewise_center=False,  # set each sample mean to 0
+        featurewise_std_normalization=False,  # divide inputs by std of the dataset
+        samplewise_std_normalization=False,  # divide each input by its std
+        zca_whitening=False,  # apply ZCA whitening
+        rotation_range=0,  # randomly rotate images in the range (degrees, 0 to 180)
+        width_shift_range=0.1,  # randomly shift images horizontally (fraction of total width)
+        height_shift_range=0.1,  # randomly shift images vertically (fraction of total height)
+        horizontal_flip=True,  # randomly flip images
+        vertical_flip=False)  # randomly flip images
+
+    # Compute quantities required for feature-wise normalization
+    # (std, mean, and principal components if ZCA whitening is applied).
+    datagen.fit(x_train)
+
+    # Fit the model on the batches generated by datagen.flow().
+    model.fit_generator(datagen.flow(x_train, y_train,
+                                     batch_size=batch_size),
+                        steps_per_epoch=x_train.shape[0] // batch_size,
+                        epochs=epochs,
+                        validation_split=0.2,callbacks=[lrate,history])
+
+predict_label = model.predict(x_test, batch_size=100, verbose=0)
+predict_label = numpy.rint(predict_label)
+
+result = numpy.zeros((900,1024,3))
+l1=[127,255,0]
+l2=[0,255,255]
+l3=[255,192,203]
+l4=[255,127,80]
+l5=[176,23,31]
+for i in range(len(predict_label)):
+    a = int(math.floor(i/1024))
+    b= i%1024
+    if predict_label[i,0] ==1:
+        result[a,b,:]=l1
+    if predict_label[i,1]==1:
+        result[a,b,:]=l2
+    if predict_label[i,2]==1:
+        result[a,b,:]=l3
+    if predict_label[i,3]==1:
+        result[a,b,:]=l4
+    if predict_label[i,4]==1:
+        result[a,b,:]=l5
+        
+
+output_folder='san_predict'
+if not os.path.isdir(output_folder):
+    os.makedirs(output_folder)
+os.chdir(output_folder)
+    
+imsave('predicted_graph.jpg',result)
+
+os.chdir('../')
+
+
+
+pl.figure(1)
+x=numpy.linspace(0,len(history.losses),len(history.losses))
+pl.plot(x,history.losses)
+pl.show()
